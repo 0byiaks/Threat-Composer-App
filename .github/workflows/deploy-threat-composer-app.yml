@@ -77,7 +77,6 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build and Push Docker Image
-        working-directory: docker
-        run: ./docker/build-push-image.sh
+        run: bash docker/build-push-image.sh
         
       
