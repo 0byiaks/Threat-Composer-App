@@ -8,7 +8,7 @@ on:
   push:
     branches:
       - main
-
+  
 permissions:
   contents: read
   id-token: write
@@ -47,12 +47,11 @@ jobs:
           terraform_version: latest
           
       - name: Terraform Init
-        working-directory: terraform
         run: terraform init
 
       - name: Terraform Plan
         working-directory: terraform
-        run: terraform plan -input=false
+        run: terraform plan 
 
       - name: Run Terraform Apply/Destroy
         working-directory: terraform
