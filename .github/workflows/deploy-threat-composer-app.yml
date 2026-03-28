@@ -1,0 +1,59 @@
+name: Deploy Threat Composer App
+
+# Secrets: AWS_ROLE_ARN, SSH_PRIVATE_KEY
+# Variables: AWS_REGION (e.g. us-east-1)
+# Settings → Secrets and variables → Actions
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-east-1
+  TERRAFORM_ACTION: apply
+
+jobs:
+  terraform:
+    name: Provision AWS infrastructure
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure SSH for Terraform modules (Git)
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/terraform_git
+          chmod 600 ~/.ssh/terraform_git
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+
+      - name: Use SSH key for Git (Terraform module sources)
+        run: echo "GIT_SSH_COMMAND=ssh -i $HOME/.ssh/terraform_git -o IdentitiesOnly=yes" >> "$GITHUB_ENV"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: latest
+          
+      - name: Terraform Init
+        working-directory: terraform
+        run: terraform init
+
+      - name: Terraform Plan
+        working-directory: terraform
+        run: terraform plan -input=false
+
+      - name: Run Terraform Apply/Destroy
+        working-directory: terraform
+        run: terraform ${TERRAFORM_ACTION} -auto-approve

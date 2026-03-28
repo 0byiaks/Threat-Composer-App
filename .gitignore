@@ -1,0 +1,9 @@
+.DS_Store
+.idea
+.vscode
+*.swp
+*.log
+
+# App build artifacts (if built locally)
+app/node_modules/
+app/build/
