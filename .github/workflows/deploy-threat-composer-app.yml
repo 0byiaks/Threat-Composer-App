@@ -15,7 +15,7 @@ permissions:
 
 env:
   AWS_REGION: us-east-1
-  TERRAFORM_ACTION: apply
+  TERRAFORM_ACTION: destroy
 
 jobs:
   terraform:
@@ -45,7 +45,7 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: latest
-          
+         
       - name: Terraform Init
         working-directory: terraform
         run: terraform init
@@ -57,11 +57,15 @@ jobs:
       - name: Run Terraform Apply/Destroy
         working-directory: terraform
         run: terraform ${TERRAFORM_ACTION} -auto-approve
+    
+    outputs:
+      terraform_action: ${{ env.TERRAFORM_ACTION }}
 
   docker:
     name: Build and Push Docker Image
     runs-on: ubuntu-latest
     needs: terraform
+    if: needs.terraform.outputs.terraform_action != 'destroy'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
