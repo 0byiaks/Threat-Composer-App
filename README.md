@@ -2,11 +2,11 @@
 
 This project deploys [AWS Labs Threat Composer](https://awslabs.github.io/threat-composer/workspaces/default/dashboard), an open-source threat modeling web application, to **Amazon ECS (Fargate)**. The container image is stored in **ECR**, traffic is served over **HTTPS** via an **Application Load Balancer**, and DNS for **titotest.co.uk** is managed with **Route 53** and **ACM**.
 
-Infrastructure is defined with **Terraform**, using a mix of **local modules** (VPC, ALB, ECR, ECS) and **reusable modules** from a separate Git repository. **Terraform state** is stored remotely in **Amazon S3** with **DynamoDB** locking (`terraform/backend.tf`).
+Infrastructure is defined with **Terraform** using the official **[HashiCorp AWS provider](https://registry.terraform.io/providers/hashicorp/aws/latest)** (`hashicorp/aws`, `~> 5.0` in `terraform/provider.tf`). The root module combines **local modules** under `terraform/modules/` with **reusable modules** from **[0byiaks/terraform-aws-modules](https://github.com/0byiaks/terraform-aws-modules)** (see table below). **Terraform state** is stored remotely in **Amazon S3** with **DynamoDB** locking (`terraform/backend.tf`).
 
 **Committed defaults** (override in `terraform/terraform.tfvars` as needed): AWS region **`us-east-1`**, environment **`dev`**, project name **`threat-composer-app`**, public site **`https://www.titotest.co.uk`** (`record_name = "www"`, `domain_name = "titotest.co.uk"`). The ECR repository name matches **`project_name`** (`threat-composer-app`), consistent with `docker/build-push-image.sh`.
 
-> **Roadmap:** Continuous integration and delivery (CI/CD) for build, test, and deploy will be added in a future update once implemented.
+**CI/CD:** Pushes to **`main`** run a **GitHub Actions** workflow (see [CI/CD (GitHub Actions)](#cicd-github-actions)) that applies Terraform and builds/pushes the Docker image to ECR.
 
 ---
 
@@ -17,6 +17,7 @@ Infrastructure is defined with **Terraform**, using a mix of **local modules** (
 - [AWS console — ECR & ECS](#aws-console--ecr--ecs)
 - [Project structure](#project-structure)
 - [Prerequisites](#prerequisites)
+- [CI/CD (GitHub Actions)](#cicd-github-actions)
 - [Containerization (Docker)](#containerization-docker)
 - [Terraform infrastructure](#terraform-infrastructure)
 - [Deployment overview](#deployment-overview)
@@ -63,13 +64,16 @@ Threat Composer App/
 │   ├── build-push-image.sh       # Build, ECR login, tag, push
 │   └── .dockerignore
 ├── images/                       # Screenshots for this README
+├── .github/
+│   └── workflows/
+│       └── deploy-threat-composer-app.yml   # Terraform + Docker build/push on push to main
 ├── terraform/
 │   ├── main.tf                   # Root module wiring
 │   ├── provider.tf               # Terraform & AWS provider constraints
 │   ├── backend.tf                # Remote state: S3 + DynamoDB lock
 │   ├── variables.tf
 │   ├── outputs.tf
-│   ├── terraform.tfvars          # Your values (region, domain, subnets, etc.)
+│   ├── terraform.tfvars          # Local values (gitignored — not committed)
 │   └── modules/
 │       ├── vpc/                  # VPC, public / private app subnets, security groups
 │       ├── alb/                  # Application Load Balancer, listeners, target group
@@ -78,12 +82,14 @@ Threat Composer App/
 └── README.md
 ```
 
-**External (reusable) modules** are referenced from `main.tf` via Git SSH, for example:
+**Module sources** (`terraform/main.tf`):
 
-- `git::ssh://git@github.com/0byiaks/terraform-aws-modules.git//modules/acm`
-- `git::ssh://git@github.com/0byiaks/terraform-aws-modules.git//modules/route53`
+| Modules | Source |
+|--------|--------|
+| **VPC**, **ALB**, **ECR**, **ECS** | Local: `./modules/...` |
+| **ACM**, **Route 53** | [terraform-aws-modules](https://github.com/0byiaks/terraform-aws-modules): `git::ssh://git@github.com/0byiaks/terraform-aws-modules.git//modules/acm` and `...//modules/route53` |
 
-Local modules live under `terraform/modules/`.
+The reusable registry and docs for those modules live in **[github.com/0byiaks/terraform-aws-modules](https://github.com/0byiaks/terraform-aws-modules)**. CI uses **SSH** (`SSH_PRIVATE_KEY`) so `terraform init` can clone those Git sources; alternatively you could switch those `source` URLs to HTTPS with a token (see the modules repo [README](https://github.com/0byiaks/terraform-aws-modules/blob/main/README.md)).
 
 ---
 
@@ -100,6 +106,28 @@ Local modules live under `terraform/modules/`.
 
 ---
 
+## CI/CD (GitHub Actions)
+
+Workflow: **[`.github/workflows/deploy-threat-composer-app.yml`](.github/workflows/deploy-threat-composer-app.yml)** — workflow name **“Deploy Threat Composer App”**.
+
+![GitHub Actions — Deploy Threat Composer App workflow runs on main](images/github-actions-pipeline.png)
+
+| Item | Details |
+|------|---------|
+| **Trigger** | Push to branch **`main`** |
+| **Auth** | **OIDC** to AWS — `permissions: id-token: write` plus **`aws-actions/configure-aws-credentials@v4`** with **`AWS_ROLE_ARN`** (repository secret). The IAM role trust policy must allow this repository (e.g. `repo:0byiaks/Threat-Composer-App:*`). |
+| **Secrets** | **`AWS_ROLE_ARN`** — IAM role ARN for GitHub OIDC. **`SSH_PRIVATE_KEY`** — private key paired with a **deploy key** on **[0byiaks/terraform-aws-modules](https://github.com/0byiaks/terraform-aws-modules)** (read-only) so `terraform init` can fetch `git::ssh://...` ACM and Route 53 modules. |
+| **Job `terraform`** (display name **“Provision AWS infrastructure”**) | Checkout → AWS creds → SSH config → `hashicorp/setup-terraform` → `terraform init` / `plan` / `${TERRAFORM_ACTION} -auto-approve` with **`working-directory: terraform`** (`env.TERRAFORM_ACTION` defaults to **`apply`**). |
+| **Job `docker`** (display name **“Build and Push Docker Image”**) | Runs after Terraform **`needs: terraform`** → checkout → AWS creds → **`aws-actions/amazon-ecr-login@v2`** → **`bash docker/build-push-image.sh`** from **repo root** (not inside `docker/`). |
+
+GitHub’s UI may shorten job labels (e.g. “deploy infra” / “build and push image”); the YAML **`name:`** fields above are what the workflow defines.
+
+**IAM for the GitHub OIDC role:** permissions for Terraform (VPC, ECS, ECR, ALB, …), **S3 + DynamoDB** for remote state, and **ECR push** for the Docker job.
+
+**Variables in CI:** Root Terraform variables must be supplied in CI the same way as locally (`terraform.tfvars` is gitignored). Use **repository variables**, **`TF_VAR_*`**, or generate a `*.tfvars` file in the workflow so `plan`/`apply` do not block on interactive prompts.
+
+---
+
 ## Containerization (Docker)
 
 The `docker/Dockerfile` uses a **multi-stage** build:
@@ -112,7 +140,7 @@ Build and push are automated in `docker/build-push-image.sh` (ECR login, tagging
 
 ```bash
 cd "/path/to/Threat Composer App"
-./docker/build-push-image.sh
+bash docker/build-push-image.sh
 ```
 
 Equivalent manual build (from repo root):
@@ -127,7 +155,7 @@ On Apple Silicon, `linux/amd64` builds can be slow (emulation); many teams build
 
 ## Terraform infrastructure
 
-Infrastructure is provisioned with **Terraform** (Infrastructure as Code) on AWS. Module sources are either **local** (`terraform/modules/…`) or **reusable modules** from another repository (`git::ssh://git@github.com/0byiaks/terraform-aws-modules.git//modules/…`).
+Infrastructure is provisioned with **Terraform** on AWS using the **HashiCorp AWS provider** and the module split described in [Project structure](#project-structure). Reusable pieces from **[0byiaks/terraform-aws-modules](https://github.com/0byiaks/terraform-aws-modules)** are only **ACM** and **Route 53**; VPC, ALB, ECR, and ECS are **local** modules in this repo.
 
 **Remote state (`terraform/backend.tf`):**
 
@@ -168,7 +196,7 @@ The `terraform` block in `provider.tf` only pins **required_version** and **prov
 - **Private ECR repository** for the Threat Composer image.
 - **Repository policy** so the execution role / ECS can pull layers (GetDownloadUrlForLayer, BatchGetImage, BatchCheckLayerAvailability).
 
-### Route 53 module (external)
+### Route 53 module (from [terraform-aws-modules](https://github.com/0byiaks/terraform-aws-modules/tree/main/modules/route53))
 
 - Uses the **hosted zone** you supply (`zone_id` in `terraform.tfvars`).
 - Creates a **DNS record** for your hostname (for this project: **`www.titotest.co.uk`** under domain **titotest.co.uk** — driven by `record_name` and `domain_name`) as an **alias (A record)** pointing to the **ALB**, so traffic resolves to the load balancer.
@@ -180,7 +208,7 @@ The `terraform` block in `provider.tf` only pins **required_version** and **prov
 
 This keeps the path **User → ALB → ECS (nginx on 80)** tight and predictable.
 
-### ACM module (external)
+### ACM module (from [terraform-aws-modules](https://github.com/0byiaks/terraform-aws-modules/tree/main/modules/acm))
 
 - Requests or references a **TLS certificate** for your domain (aligned with `domain_name` in Terraform variables).
 - Certificate ARN is passed into the **ALB** module for the **HTTPS listener**, enabling **https://** for your public hostname.
@@ -193,29 +221,34 @@ There is no separate root-level IAM module: **ECS** defines the **task execution
 
 ## Deployment overview
 
+### Automated (GitHub Actions)
+
+On each push to **`main`**, **Deploy Threat Composer App** runs **Provision AWS infrastructure** then **Build and Push Docker Image** (see screenshot in [CI/CD](#cicd-github-actions)). Ensure **GitHub secrets**, **OIDC trust**, **SSH deploy key** on **[terraform-aws-modules](https://github.com/0byiaks/terraform-aws-modules)**, and **Terraform variables** for CI are configured.
+
+### Manual (local)
+
 1. **Configure** `terraform/terraform.tfvars` (`aws_region`, CIDRs, `domain_name`, Route 53 `zone_id`, `record_name`, `image_tag`, etc.). Keep **`project_name`** aligned with the ECR repo name and `docker/build-push-image.sh` (`threat-composer-app` unless you change all three consistently).
 2. **Ensure remote state** — S3 bucket and DynamoDB lock table from `backend.tf` exist and your credentials can access them.
-3. **Build and push** the container image to ECR (`./docker/build-push-image.sh` uses **`us-east-1`** and repo **`threat-composer-app`**; match `aws_region` and `project_name` in Terraform or update the script).
+3. **Build and push** the container image to ECR (`bash docker/build-push-image.sh` from repo root; script uses **`us-east-1`** and repo **`threat-composer-app`**; match `aws_region` and `project_name` in Terraform or update the script).
 4. **Initialize and apply** Terraform from `terraform/`:
 
    ```bash
    cd terraform
-   terraform init    # configures the S3 backend; use -migrate-state if moving from local state
-   terraform plan
-   terraform apply
+   terraform init -input=false
+   terraform plan -input=false
+   terraform apply -input=false
    ```
 
 5. **Verify** DNS propagation, **HTTPS** at your record (e.g. **https://www.titotest.co.uk**), and ECS service **running** task count in the AWS console.
 
 **Outputs:** Root `outputs.tf` currently exposes **`acm_certificate_arn`** (extend if you want ALB DNS, ECR URL, etc.).
 
-After CI/CD is added, image build/push and optional Terraform steps can run from GitHub Actions (or another pipeline) instead of only from your laptop.
-
 ---
 
 ## Useful links
 
 - [Threat Composer (AWS Labs)](https://awslabs.github.io/threat-composer/workspaces/default/dashboard)
-- [Terraform AWS provider](https://registry.terraform.io/providers/hashicorp/aws/latest/docs)
+- [Terraform AWS provider (HashiCorp Registry)](https://registry.terraform.io/providers/hashicorp/aws/latest/docs)
+- [terraform-aws-modules — reusable ACM & Route 53 modules](https://github.com/0byiaks/terraform-aws-modules)
 - [Amazon ECS](https://docs.aws.amazon.com/ecs/latest/userguide/what-is-ecs.html)
 - [Amazon ECR](https://docs.aws.amazon.com/ecr/latest/userguide/what-is-ecr.html)
